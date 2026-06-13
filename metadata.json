@@ -1,0 +1,6 @@
+{
+  "name": "macOS Remote Connect Blueprint",
+  "description": "An interactive remote-desktop companion, simulation, and architectural guide for connecting macOS clients to Windows host environments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
