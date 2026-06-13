@@ -55,6 +55,214 @@ const defaultHost: HostState = {
   ],
 };
 
+// Dynamic memory registry for real-time host connection matchmaking
+interface ActiveHost {
+  id: string;
+  pass: string;
+  os: string;
+  hostname: string;
+  lastSeen: number;
+}
+
+interface RealtimeSession {
+  sessionId: string;
+  controllerId: string;
+  hostId: string;
+  lastSeen: number;
+  chatMessages: any[];
+  terminalHistory: string[];
+  hostFiles: any[];
+  mouseCursor: { x: number; y: number } | null;
+  pendingCommand: any | null;
+  status: "active" | "disconnected";
+}
+
+const activeHosts: { [id: string]: ActiveHost } = {};
+const realtimeSessions: { [id: string]: RealtimeSession } = {};
+
+// 1. Dynamic machine registration heartbeat
+app.post("/api/register-host", (req, res) => {
+  const { id, pass, os, hostname } = req.body;
+  if (!id) {
+    return res.status(400).json({ error: "Thiếu ID thiết bị" });
+  }
+  const cleanId = id.replace(/\s+/g, "");
+  activeHosts[cleanId] = {
+    id,
+    pass: pass || "5599",
+    os: os || "macOS Client",
+    hostname: hostname || "MacBook-Air-User",
+    lastSeen: Date.now()
+  };
+
+  // Check if someone connected to us
+  let connectedSessionId = null;
+  let controllerInfo = null;
+  for (const sessId in realtimeSessions) {
+    const session = realtimeSessions[sessId];
+    if (session.hostId.replace(/\s+/g, "") === cleanId && session.status === "active") {
+      connectedSessionId = sessId;
+      controllerInfo = { id: session.controllerId };
+      break;
+    }
+  }
+
+  // Periodic pruning of stale hosts (> 12 seconds inactive)
+  const now = Date.now();
+  for (const hostId in activeHosts) {
+    if (now - activeHosts[hostId].lastSeen > 12000) {
+      delete activeHosts[hostId];
+    }
+  }
+
+  res.json({
+    status: "ok",
+    connectedSessionId,
+    controllerInfo
+  });
+});
+
+// 2. Connector matchmaking and setup
+app.post("/api/connect-partner", (req, res) => {
+  const { partnerId, partnerPass, myId } = req.body;
+  if (!partnerId || !partnerPass) {
+    return res.status(400).json({ error: "Vui lòng nhập đầy đủ ID và mật khẩu kết nối." });
+  }
+
+  const cleanPartnerId = partnerId.replace(/\s+/g, "");
+  const cleanMyId = myId ? myId.replace(/\s+/g, "") : "";
+
+  // Scenario A: Standard Simulated Offline Host
+  if (cleanPartnerId === defaultHost.id.replace(/\s+/g, "")) {
+    if (partnerPass !== defaultHost.pass) {
+      return res.status(400).json({ error: `Mật khẩu kết nối sai. Gợi ý: Nhập mật khẩu '${defaultHost.pass}'` });
+    }
+    return res.json({
+      status: "connected",
+      mode: "simulation",
+      hostInfo: {
+        id: defaultHost.id,
+        os: defaultHost.os,
+        hostname: defaultHost.hostname
+      }
+    });
+  }
+
+  // Scenario B: Real-time Host Connection
+  const targetHost = activeHosts[cleanPartnerId];
+  if (!targetHost) {
+    return res.status(404).json({ error: "Máy đối tác hiện không trực tuyến! Hãy chắc chắn đối tác đã mở ứng dụng và kết nối cùng mạng Internet." });
+  }
+
+  if (targetHost.pass !== partnerPass) {
+    return res.status(400).json({ error: "Mật khẩu kết nối chưa chính xác. Vui lòng kiểm tra lại!" });
+  }
+
+  // Established connection mapping
+  const sessionId = `sess_${cleanMyId}_${cleanPartnerId}`;
+  realtimeSessions[sessionId] = {
+    sessionId,
+    controllerId: myId,
+    hostId: targetHost.id,
+    lastSeen: Date.now(),
+    chatMessages: [
+      { id: "1", sender: "system", message: `Hệ thống: Kết nối thành công tới trạm máy ${targetHost.hostname}.`, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+    ],
+    terminalHistory: [
+      `[PROMPT CONNECTED TO REALTIME INSTANCE: ${targetHost.hostname}]`,
+      `Client ID: ${targetHost.id}`,
+      `OS Platform: ${targetHost.os}`,
+      `Gõ lệnh 'dir', 'ipconfig', hoặc 'systeminfo' để truy cứu...`
+    ],
+    hostFiles: [
+      { id: "1", name: "ReadMe.txt", path: "C:\\Users\\Support\\Desktop\\ReadMe.txt", size: "1.2 KB", content: "Chào mừng chuyên gia! Đây là file thật từ máy tính bên kia của tôi." }
+    ],
+    mouseCursor: { x: 0, y: 0 },
+    pendingCommand: null,
+    status: "active"
+  };
+
+  res.json({
+    status: "connected",
+    mode: "realtime",
+    sessionId,
+    hostInfo: {
+      id: targetHost.id,
+      os: targetHost.os,
+      hostname: targetHost.hostname
+    }
+  });
+});
+
+// 3. Client-Host state packet synchronization pool
+app.post("/api/session-sync", (req, res) => {
+  const { sessionId, role, chatInput, terminalInput, hostFiles, mouseCursor, terminalOutput, deleteFileId } = req.body;
+  const session = realtimeSessions[sessionId];
+  
+  if (!session || session.status !== "active") {
+    return res.json({ status: "disconnected" });
+  }
+
+  session.lastSeen = Date.now();
+
+  // Handle active chat payload injection
+  if (chatInput) {
+    session.chatMessages.push({
+      id: Date.now().toString(),
+      sender: role,
+      message: chatInput.message,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    });
+  }
+
+  // Handle terminal submit
+  if (role === "controller" && terminalInput) {
+    session.terminalHistory.push(`C:\\Support> ${terminalInput}`);
+    session.pendingCommand = {
+      id: Date.now().toString(),
+      cmd: terminalInput
+    };
+  }
+
+  // Handle terminal output responses
+  if (role === "host" && terminalOutput) {
+    session.terminalHistory.push(terminalOutput);
+    session.pendingCommand = null;
+  }
+
+  // Handle file synchronizations
+  if (hostFiles) {
+    session.hostFiles = hostFiles;
+  }
+
+  if (deleteFileId) {
+    session.hostFiles = session.hostFiles.filter((f: any) => f.id !== deleteFileId);
+  }
+
+  if (mouseCursor) {
+    session.mouseCursor = mouseCursor;
+  }
+
+  res.json({
+    status: "active",
+    chatMessages: session.chatMessages,
+    terminalHistory: session.terminalHistory,
+    hostFiles: session.hostFiles,
+    mouseCursor: session.mouseCursor,
+    pendingCommand: session.pendingCommand
+  });
+});
+
+// 4. Session teardown trigger
+app.post("/api/session-disconnect", (req, res) => {
+  const { sessionId } = req.body;
+  if (sessionId && realtimeSessions[sessionId]) {
+    realtimeSessions[sessionId].status = "disconnected";
+    delete realtimeSessions[sessionId];
+  }
+  res.json({ status: "disconnected" });
+});
+
 // API Endpoints for connection status and simulation control
 app.get("/api/host-info", (req, res) => {
   res.json({

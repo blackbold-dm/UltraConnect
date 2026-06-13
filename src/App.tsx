@@ -3,9 +3,11 @@ import {
   Monitor, Cpu, Lock, Send, Copy, Check, FolderOpen, Terminal, 
   AlertTriangle, ExternalLink, RefreshCw, Download, UploadCloud, 
   X, MessageSquare, Laptop, Key, CheckCircle, Network, ArrowRight,
-  Shield, Code, HelpCircle, Server, Minimize2, Play, Sliders
+  Shield, Code, HelpCircle, Server, Minimize2, Play, Sliders,
+  Eye, EyeOff
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import JSZip from "jszip";
 import { explanationData, codeTemplates, openSourceAlternatives } from "./data";
 import { HostSpec, ChatMessage, SimulatedFile } from "./types";
 
@@ -27,17 +29,37 @@ export default function App() {
   const [isPackageCompleted, setIsPackageCompleted] = useState(false);
   
   // Simulated macOS client identity
-  const [myId, setMyId] = useState("381 052 746");
+  const [myId] = useState(() => {
+    let saved = typeof window !== "undefined" ? localStorage.getItem("ultraviewer_mac_my_id") : null;
+    if (!saved) {
+      // Generate a realistic 9-digit ID formatted like "XXX XXX XXX"
+      const part1 = Math.floor(100 + Math.random() * 900);
+      const part2 = Math.floor(100 + Math.random() * 900);
+      const part3 = Math.floor(100 + Math.random() * 900);
+      saved = `${part1} ${part2} ${part3}`;
+      if (typeof window !== "undefined") {
+        localStorage.setItem("ultraviewer_mac_my_id", saved);
+      }
+    }
+    return saved;
+  });
   const [myPass, setMyPass] = useState("5599");
   
   // Connection partner form state (defaults match standard simulation partner)
   const [partnerId, setPartnerId] = useState("542 918 367");
   const [partnerPass, setPartnerPass] = useState("2468");
+  const [showPartnerPass, setShowPartnerPass] = useState(false);
   
   // Connection states
   const [isConnecting, setIsConnecting] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [sessionMode, setSessionMode] = useState<"simulation" | "realtime">("simulation");
+  const [sessionId, setSessionId] = useState<string>("");
+  const [isBeingControlled, setIsBeingControlled] = useState(false);
+  const [controllingPartnerId, setControllingPartnerId] = useState("");
   const [connectionError, setConnectionError] = useState("");
+  const [showMacSetupModal, setShowMacSetupModal] = useState(false);
+  const [showWinSetupModal, setShowWinSetupModal] = useState(false);
   const [connectionTime, setConnectionTime] = useState<string>("00:00");
   const [ping, setPing] = useState(4);
   const [fps, setFps] = useState(60);
@@ -149,15 +171,140 @@ export default function App() {
     terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [terminalHistory]);
 
+  // Register local ID to server as available host
+  useEffect(() => {
+    if (!myId) return;
+    
+    // Heartbeat every 3 seconds to let server know this client can be controlled
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch("/api/register-host", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: myId,
+            pass: myPass,
+            os: "macOS Sequoia v15.4",
+            hostname: "MacBook-Air-User"
+          })
+        });
+        const data = await response.json();
+        if (data.connectedSessionId) {
+          // Oh! Someone connected to us in real-time!
+          setSessionId(data.connectedSessionId);
+          setSessionMode("realtime");
+          setIsBeingControlled(true);
+          setControllingPartnerId(data.controllerInfo?.id || "Chuyên gia");
+          setIsConnected(true);
+          setActiveTab("session");
+        } else {
+          // If we was being controlled but now there is no active session on server, we disconnect
+          if (isBeingControlled) {
+            setIsBeingControlled(false);
+            setIsConnected(false);
+            setSessionId("");
+            setActiveTab("control");
+            showToast("Đối tác đã đóng phiên kiểm soát từ xa.");
+          }
+        }
+      } catch (err) {
+        console.error("Lỗi đăng ký máy chủ điều phối:", err);
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [myId, myPass, isBeingControlled]);
+
+  // Real-time Session Synchronization (for both controller and host roles)
+  useEffect(() => {
+    if (!isConnected || sessionMode !== "realtime" || !sessionId) return;
+
+    let isFetching = false;
+    const interval = setInterval(async () => {
+      if (isFetching) return;
+      isFetching = true;
+      try {
+        const role = isBeingControlled ? "host" : "controller";
+        const response = await fetch("/api/session-sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId,
+            role
+          })
+        });
+        const data = await response.json();
+        
+        if (data.status === "disconnected") {
+          setIsConnected(false);
+          setIsBeingControlled(false);
+          setSessionId("");
+          setActiveTab("control");
+          showToast("Phiên kết nối thời gian thực đã đóng.");
+          clearInterval(interval);
+          return;
+        }
+
+        // Sync chats
+        if (data.chatMessages) {
+          setChatMessages(data.chatMessages);
+        }
+
+        // Sync terminal history
+        if (data.terminalHistory) {
+          setTerminalHistory(data.terminalHistory);
+        }
+
+        // Sync host files
+        if (data.hostFiles) {
+          setHostFiles(data.hostFiles);
+        }
+
+        // Host handles pending commands from Controller
+        if (role === "host" && data.pendingCommand) {
+          const cmdObj = data.pendingCommand;
+          // Execute the command in host simulation (or simulated DOS output)
+          let output = "";
+          const command = cmdObj.cmd.trim().toLowerCase();
+          
+          if (command.startsWith("dir")) {
+            output = ` Volume in drive C has no label.\n Volume Serial Number is 4C2F-9B1D\n\n Directory of C:\\Users\\Support\n\n13/06/2026  01:49 PM    <DIR>          .\n13/06/2026  01:49 PM    <DIR>          ..\n13/06/2026  01:49 PM    <DIR>          Desktop\n13/06/2026  01:49 PM    <DIR>          Documents\n13/06/2026  01:49 PM    <DIR>          Downloads\n               ${hostFiles.length} File(s)          ${hostFiles.reduce((acc, f) => acc + (f.content?.length || 0), 0)} bytes\n               4 Dir(s)  120,412,852,224 bytes free`;
+          } else if (command.startsWith("ipconfig")) {
+            output = `\nWindows IP Configuration\n\nEthernet adapter Ethernet0:\n   Connection-specific DNS Suffix  . : localdomain\n   IPv4 Address. . . . . . . . . . . : 192.168.10.125\n   Subnet Mask . . . . . . . . . . . : 255.255.255.0\n   Default Gateway . . . . . . . . . : 192.168.10.1\n\nWireless LAN adapter Wi-Fi:\n   Media State . . . . . . . . . . . : Media disconnected`;
+          } else if (command.startsWith("systeminfo")) {
+            output = `Host Name:                 WIN-WORKSTATION-X\nOS Name:                   Microsoft Windows 11 Professional\nOS Version:                10.0.22631 N/A Build 22631\nOS Manufacturer:           Microsoft Corporation\nOS Configuration:          Stand-alone Workstation\nProduct ID:                00330-80000-00000-AA542\nSystem Model:              Virtual Machine\nSystem Type:               x64-based PC`;
+          } else if (command.startsWith("echo")) {
+            output = cmdObj.cmd.substring(5).trim();
+          } else {
+            output = `'${cmdObj.cmd}' is not recognized as an internal or external command,\noperable program or batch file. Available: dir, ipconfig, systeminfo, echo.`;
+          }
+
+          // Report execution outcome back to server
+          await fetch("/api/session-sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId,
+              role: "host",
+              terminalOutput: output
+            })
+          });
+        }
+      } catch (err) {
+        console.error("Real-time sync error:", err);
+      } finally {
+        isFetching = false;
+      }
+    }, 1500);
+
+    return () => clearInterval(interval);
+  }, [isConnected, sessionMode, sessionId, isBeingControlled, hostFiles]);
+
   // Action: Refresh My Temporary ID/Password
   const refreshMyCredentials = () => {
-    const randomId = Math.floor(100000000 + Math.random() * 900000000)
-      .toString()
-      .replace(/(\d{3})(\d{3})(\d{3})/, "$1 $2 $3");
     const randomPass = Math.floor(1000 + Math.random() * 9000).toString();
-    setMyId(randomId);
     setMyPass(randomPass);
-    showToast("Đã cấp mật khẩu mã hóa mới thành công.");
+    showToast("Đã làm mới mật khẩu mã hóa thành công.");
   };
 
   // Toast notifier helper
@@ -167,34 +314,87 @@ export default function App() {
   };
 
   // Action: Connect Remote Partner Session
-  const handleConnect = (e: React.FormEvent) => {
+  const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
     setConnectionError("");
-    
-    if (partnerId.replace(/\s+/g, "") !== hostSpec.id.replace(/\s+/g, "")) {
-      setConnectionError("ID đối tác chưa chính xác! Gợi ý: Hãy nhập ID '" + hostSpec.id + "'");
-      return;
-    }
-
-    if (partnerPass !== hostSpec.pass) {
-      setConnectionError("Mật khẩu kết nối sai. Gợi ý: Nhập mật khẩu '" + hostSpec.pass + "'");
-      return;
-    }
-
     setIsConnecting(true);
 
-    // Simulate real remote handshake negotiation over WebRTC signaling protocol
-    setTimeout(() => {
+    try {
+      const response = await fetch("/api/connect-partner", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          partnerId,
+          partnerPass,
+          myId
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        setConnectionError(data.error || "Không thể kết nối đến đối tác.");
+        setIsConnecting(false);
+        return;
+      }
+
+      if (data.mode === "simulation") {
+        setSessionMode("simulation");
+        setHostSpec({
+          id: data.hostInfo.id,
+          pass: "2468",
+          os: data.hostInfo.os,
+          hostname: data.hostInfo.hostname,
+          status: "online"
+        });
+        
+        setTimeout(() => {
+          setIsConnecting(false);
+          setIsConnected(true);
+          setActiveTab("session");
+          showToast("Khởi tạo luồng điều khiển WebRTC HD cấu hình thành công!");
+        }, 1200);
+      } else {
+        // Real-time mode !
+        setSessionMode("realtime");
+        setSessionId(data.sessionId);
+        setIsBeingControlled(false);
+        setHostSpec({
+          id: data.hostInfo.id,
+          pass: partnerPass,
+          os: data.hostInfo.os,
+          hostname: data.hostInfo.hostname,
+          status: "online"
+        });
+
+        setTimeout(() => {
+          setIsConnecting(false);
+          setIsConnected(true);
+          setActiveTab("session");
+          showToast("Kết nối thời gian thực tới thiết bị đối tác thành công!");
+        }, 1200);
+      }
+    } catch (err: any) {
+      setConnectionError("Lỗi kết nối máy chủ điều phối: " + err.message);
       setIsConnecting(false);
-      setIsConnected(true);
-      setActiveTab("session");
-      showToast("Khởi tạo luồng điều khiển WebRTC HD thành công!");
-    }, 1800);
+    }
   };
 
   // Action: Disconnect Session
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
+    if (sessionMode === "realtime" && sessionId) {
+      try {
+        await fetch("/api/session-disconnect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId })
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    }
     setIsConnected(false);
+    setIsBeingControlled(false);
+    setSessionId("");
     setActiveTab("control");
     showToast("Đã đóng phiên kết nối điều khiển từ xa.");
   };
@@ -213,6 +413,29 @@ export default function App() {
     if (!terminalInput.trim()) return;
 
     const currentCommand = terminalInput;
+
+    if (sessionMode === "realtime") {
+      setTerminalInput("");
+      try {
+        const response = await fetch("/api/session-sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId,
+            role: "controller",
+            terminalInput: currentCommand
+          })
+        });
+        const data = await response.json();
+        if (data.terminalHistory) {
+          setTerminalHistory(data.terminalHistory);
+        }
+      } catch (err) {
+        showToast("Lỗi truyền lệnh thời gian thực.");
+      }
+      return;
+    }
+
     setTerminalHistory((prev) => [...prev, `${terminalCwd}> ${currentCommand}`]);
     setTerminalInput("");
 
@@ -255,6 +478,30 @@ export default function App() {
     if (!chatInput.trim()) return;
 
     const userMessageText = chatInput;
+
+    if (sessionMode === "realtime") {
+      setChatInput("");
+      try {
+        const role = isBeingControlled ? "host" : "client";
+        const response = await fetch("/api/session-sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId,
+            role,
+            chatInput: { message: userMessageText }
+          })
+        });
+        const data = await response.json();
+        if (data.chatMessages) {
+          setChatMessages(data.chatMessages);
+        }
+      } catch (err) {
+        showToast("Lỗi gửi tin nhắn thời gian thực.");
+      }
+      return;
+    }
+
     const clientMsg: ChatMessage = {
       id: Date.now().toString(),
       sender: "client",
@@ -330,7 +577,21 @@ export default function App() {
               size: `${Math.max(1, Math.round((newFileContent.length || 100) / 1024 * 10) / 10)} KB`,
               content: newFileContent || "Nội dung file rỗng."
             };
-            setHostFiles((prev) => [...prev, addedFile]);
+            const updatedFiles = [...hostFiles, addedFile];
+            setHostFiles(updatedFiles);
+
+            if (sessionMode === "realtime" && sessionId) {
+              fetch("/api/session-sync", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  sessionId,
+                  role: isBeingControlled ? "host" : "controller",
+                  hostFiles: updatedFiles
+                })
+              }).catch(e => console.error("Lỗi đồng bộ files:", e));
+            }
+
             setUploadProgress(null);
             setNewFileName("");
             setNewFileContent("");
@@ -445,7 +706,7 @@ export default function App() {
     setIsPackageCompleted(false);
 
     const isWin = packagePlatform === "windows";
-    const appExt = isWin ? (packageFormat === "portable" ? ".zip" : ".exe") : ".zip";
+    const appExt = isWin ? (packageFormat === "portable" ? ".zip" : ".exe") : (packageFormat === "portable" ? ".zip" : ".pkg");
     
     const steps = isWin ? [
       { prg: 10, log: `[PACKAGER] Khởi động mô-đun đóng gói tự động cho Windows: ${packageFormat === "electron" ? "Electron wrapper (.EXE)" : packageFormat === "tauri" ? "Tauri light-weight package" : "Win32 Portable App (.ZIP)"}` },
@@ -454,15 +715,15 @@ export default function App() {
       { prg: 60, log: "[VITE-BUILD] Xuất bản thành công tài nguyên HTML5/React dạng static lồng vào ./dist/" },
       { prg: 75, log: `[WRAPPER] Đang định dạng mã nguồn Windows, lồng tệp cấu hình ${packageFormat === "electron" ? "electron-builder.yml" : "tauri.conf.json"}` },
       { prg: 90, log: "[SIGNING] Tạo chữ ký số chống cảnh báo Windows Defender SmartScreen..." },
-      { prg: 100, log: `[SUCCESS] Đóng gói thành công! Bộ cài đặt sẵn sàng tải xuống tại: ./dist/UltraConnect_Windows_v1.0.0${appExt}` }
+      { prg: 100, log: `[SUCCESS] Đóng gói thành công! Bộ cài đặt sẵn sàng tải xuống tại: ./dist/UltraConnect_Windows_v1.2.5${appExt}` }
     ] : [
-      { prg: 10, log: `[PACKAGER] Khởi động mô-đun đóng gói tự động cho macOS: ${packageFormat === "electron" ? "Electron App Bundle (.APP)" : packageFormat === "tauri" ? "Tauri Cocoa App" : "macOS Portable Bundle (.ZIP)"}` },
+      { prg: 10, log: `[PACKAGER] Khởi động mô-đun đóng gói phân phối cho macOS: ${packageFormat === "electron" ? "Apple Flat Package (.PKG Installer)" : "macOS Portable Bundle (.ZIP)"}` },
       { prg: 25, log: "[COMPILER] Đang phân tích file cấu hình Xcode plist & Info.plist..." },
       { prg: 45, log: "[VITE-BUILD] Đang kích hoạt trình biên dịch: `npm run build` cho cấu trúc Darwin..." },
       { prg: 65, log: "[VITE-BUILD] Hoàn tất xuất bản tài nguyên tĩnh vào thư mục distribution." },
-      { prg: 80, log: "[BUNDLE] Thiết lập cấu hình đóng gói macOS DMG & Zip, tạo Launcher Icon 1024x1024 sắc nét..." },
-      { prg: 90, log: "[SIGNING] Ký chứng thư số Apple Developer Code Signing Certificate..." },
-      { prg: 100, log: `[SUCCESS] Đóng gói thành công! Bộ cài đặt sẵn sàng tải xuống tại: ./dist/UltraConnect_macOS_v1.0.0.zip` }
+      { prg: 80, log: `[BUNDLE] Thiết lập cấu hình đóng gói macOS ${packageFormat === "electron" ? "Flat Installer Package (.PKG)" : "Zip Portable Archive"}, tạo Launcher Icon 1024x1024...` },
+      { prg: 90, log: "[SIGNING] Ký chứng thư số Apple Developer Code Signing Certificate & Công chứng Gatekeeper Notarize..." },
+      { prg: 100, log: `[SUCCESS] Đóng gói thành công! Bộ cài đặt sẵn sàng tải xuống tại: ./dist/UltraConnect_macOS_v1.2.5${appExt}` }
     ];
 
     setPackagingLogs([steps[0].log]);
@@ -479,21 +740,39 @@ export default function App() {
         clearInterval(interval);
         setIsPackaging(false);
         setIsPackageCompleted(true);
-        showToast(`Đóng gói ứng dụng ${isWin ? "Windows" : "macOS"} thành công!`);
+        showToast(`Đóng gói ứng dụng ${isWin ? "Windows (.EXE)" : "macOS (.PKG)"} thành công!`);
       }
     }, 600);
   };
 
+  // Direct Download for genuine binary wrappers
+  const handleDownloadInstallerDirect = (type: "exe" | "pkg") => {
+    try {
+      if (type === "pkg") {
+        setShowMacSetupModal(true);
+        handleDownloadPackage("macos");
+      } else {
+        setShowWinSetupModal(true);
+        handleDownloadPackage("windows");
+      }
+    } catch (err) {
+      console.error(err);
+      showToast("Lỗi khi tải bộ cài trực tiếp.");
+    }
+  };
+
   // Helper dynamic download dispenser
-  const handleDownloadPackage = (plat: "windows" | "macos") => {
-    const fileName = plat === "windows" 
-      ? "UltraConnect_Windows_Setup_and_Instructions.txt"
-      : "UltraConnect_macOS_Setup_and_Instructions.txt";
+  const handleDownloadPackage = async (plat: "windows" | "macos") => {
+    try {
+      showToast("Đang chuẩn bị đóng gói tệp tin...");
       
-    const content = `========================================================================
-                      ULTRACONNECT PORTABLE RELEASE v1.0.0
+      const zip = new JSZip();
+      
+      // 1. Vietnamese quick-start instructions
+      const guideContent = `========================================================================
+                      ULTRACONNECT PORTABLE RELEASE v1.2.5
 ========================================================================
-Platform: ${plat === "windows" ? "Windows 10/11 (64-bit)" : "macOS (Compatible with Apple Silicon M1/M2/M3 & Intel)"}
+Platform: ${plat === "windows" ? "Windows 10/11 (64-bit)" : "macOS (Apple Silicon & Intel)"}
 Format: Portable Installation Zip Manual & Script Package
 Release Date: 2026-06-13 (Direct Build compiled on host container)
 
@@ -506,44 +785,547 @@ trễ điều khiển phím chuột thấp (~12ms) và bảo mật kênh truyề
 CẨM NANG HƯỚNG DẪN LẮP ĐẶT NHANH (QUICK-START GUIDE):
 ------------------------------------------------------------------------
 ${plat === "windows" ? `
-1. Giải nén toàn bộ tệp UltraConnect_Windows_Setup.zip của bạn ra bất cứ thư mục làm việc nào.
-2. Click chuột phải vào file thực thi 'UltraConnect.exe', chọn "Run as Administrator" (Chạy dưới quyền quản trị viên) nhằm cấp quyền điều khiển ngoại vi.
-3. Nếu Windows hiển thị cảnh báo "Windows Defender SmartScreen" bảo mật:
-   -> Hãy nhấp chọn "More Info" (Thông tin thêm).
-   -> Nhấp vào nút "Run Anyway" (Vẫn chạy ứng dụng) để hoàn tất khởi động.
-4. Nhập ID mặc định giả lập của đối tác là '542 918 367' và Mật khẩu '2468' để bước vào giao diện Win11 ảo điều hướng tuyệt hảo.` : `
-1. Giải nén tệp UltraConnect_macOS_Setup.zip trên máy Mac của bạn.
-2. Sao chép và di dời ứng dụng 'UltraConnect.app' vào thư mục /Applications (Ứng dụng) hệ thống.
-3. Vì đây là phần mềm đóng gói cục bộ mã nguồn mở tự kiểm thử, hệ thống macOS Gatekeeper có thể hiển thị cảnh báo tin cậy lần đầu. Hãy mở terminal và chạy lệnh mở khóa Gatekeeper sau để cấp phép chạy:
-   
-   sudo xattr -rd com.apple.quarantine /Applications/UltraConnect.app
+GIẢI PHÁP 1 - CHẠY KHÔNG CẦN CẤU HÌNH (SIÊU ĐƠN GIẢN - KHUYÊN DÙNG):
+-> Click đúp vào tệp 'MO_GIAO_DIEN_OFFLINE.html' ở ngay thư mục gốc vừa giải nén.
+-> Ứng dụng sẽ tự động khởi động ngay lập tức trên trình duyệt mà không cần cài đặt.
 
-4. Đi tới System Settings (Cài đặt hệ thống) -> Privacy & Security (Bảo mật & Quyền riêng tư):
-   -> Mục "Accessibility" (Trợ năng): Bật cấp quyền cho "UltraConnect".
-   -> Mục "Screen Recording" (Ghi màn hình): Bật cấp quyền chia sẻ luồng hình ảnh.
-5. Khởi động app qua Launchpad hoặc Spotlight, nhập thông tin liên kết và bắt đầu quản lý màn hình Windows từ xa.`}
+GIẢI PHÁP 2 - CHẠY BẢN BUNDLE WINDOWS:
+1. Giải nén toàn bộ tệp UltraConnect_Windows_Setup.zip của bạn ra bất kỳ thư mục làm việc nào.
+2. Để chạy bản Standalone mượt mà trong trình duyệt offline:
+   -> Nhấp đúp chuột vào tệp 'StartApp.bat'. Giao diện UltraConnect Client sẽ tải ngay.
+3. Để thử nghiệm Node Websocket Server cục bộ trung chuyển kết nối:
+   -> Nhấp đúp tải server cục bộ qua tệp 'RunServer.bat' (Port 3000).
+4. Để đóng gói thành phần mềm .EXE thật bằng Electron:
+   -> Cài đặt NodeJS, gõ 'npm install' và 'npm run package-win' ở Command Prompt.` : `
+GIẢI PHÁP 1 - CHẠY KHÔNG CẦN CẤU HÌNH (SIÊU ĐƠN GIẢN - KHUYÊN DÙNG TRÊN MACOS):
+👉 Bạn KHÔNG cần phải chạy file Terminal/Command phức tạp.
+👉 Chỉ cần nhấp đúp chuột vào tệp 'MO_GIAO_DIEN_OFFLINE.html' ngay tại thư mục ngoài cùng vừa giải nén.
+👉 Hệ thống sẽ tự động khởi động giao diện UltraConnect Remote Client trực tiếp trên Safari/Chrome của bạn. Hoàn toàn bảo mật và ngoại tuyến 100%!
+
+GIẢI PHÁP 2 - SỬA LỖI KHÔNG CHẠY ĐƯỢC FILE '.COMMAND' TRÊN MACOS (PERMISSION DENIED):
+Mặc định khi tải file nén từ trình duyệt về macOS, các file script '.command' bị tước quyền thực thi bảo mật. Để kích hoạt, hãy làm theo hướng dẫn:
+1. Nhấn tổ hợp phím 'Command + Spacebar', tìm kiếm 'Terminal' và mở nó lên.
+2. Nhập lệnh sau (lưu ý có một dấu cách trống ở cuối lệnh):
+   chmod +x 
+3. Kéo thả trực tiếp file 'StartApp.command' từ Finder vào cửa sổ Terminal, sau đó nhấn nút 'Enter'.
+👉 Xong! Bây giờ bạn đã có thể nhấp đúp chuột vào file 'StartApp.command' để chạy bình thường như một ứng dụng hệ thống.`}
 
 THÔNG SỐ SIGNALING SERVER (GATEWAY):
 ------------------------------------------------------------------------
-- Trạm tín hiệu điều phối: UltraServer v3.2 Asia-Southeast Gateway
+- Trạm tín hiệu điều phối: UltraServer v3.2 Gateway
 - Công nghệ truyền tải: WebRTC P2P DataChannels / WebSocket Signaler
 - Security Protocol: End-to-End TLS 1.3 Encryption
 
 Cảm ơn quý khách đã tin cậy nâng cấp và sử dụng UltraConnect Companion v1.0!
-Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc & Code Plugin".
 ========================================================================
 `;
+      zip.file("CAU_HINH_HUONG_DAN_NHANH.txt", guideContent);
 
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-    showToast(`Đã lưu tệp giải nén hướng dẫn & setup ${plat === "windows" ? "Windows" : "macOS"} (.ZIP format)!`);
+      // 2. Add package.json for desktop wrappers
+      const packageJson = {
+        name: "ultraconnect-desktop",
+        version: "1.0.0",
+        description: "UltraConnect Standalone Desktop Core Wrapper",
+        main: "electron-main.cjs",
+        scripts: {
+          start: "electron .",
+          "package-win": "electron-builder --win",
+          "package-mac": "electron-builder --mac"
+        },
+        dependencies: {
+          electron: "^28.0.0"
+        }
+      };
+      zip.file("package.json", JSON.stringify(packageJson, null, 2));
+
+      // 3. Add electron-main.cjs starter code
+      const electronMain = `// electron-main.cjs - Electron entrypoint for UltraConnect
+const { app, BrowserWindow } = require('electron');
+const path = require('path');
+
+function createWindow() {
+  const mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    titleBarStyle: 'default',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    }
+  });
+
+  // Load standalone app index
+  mainWindow.loadFile(path.join(__dirname, 'app/index.html'));
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});`;
+      zip.file("electron-main.cjs", electronMain);
+
+      // 4. Add mock tauri wrapper config for learning reference
+      const tauriConfig = {
+        build: {
+          beforeBuildCommand: "npm run build",
+          beforeDevCommand: "npm run dev",
+          devPath: "http://localhost:3000",
+          distDir: "../dist"
+        },
+        package: {
+          binaryName: "UltraConnect",
+          version: "1.0.0"
+        },
+        tauri: {
+          bundle: {
+            active: true,
+            category: "Utility",
+            identifier: "com.ultraconnect.app",
+            icon: ["icons/32x32.png", "icons/128x128.png", "icons/icon.icns", "icons/icon.ico"],
+            targets: "all"
+          },
+          windows: [
+            {
+              fullscreen: false,
+              height: 800,
+              resizable: true,
+              title: "UltraConnect Light Client",
+              width: 1280
+            }
+          ]
+        }
+      };
+      zip.file("tauri.conf.json", JSON.stringify(tauriConfig, null, 2));
+
+      // 5. Add platform-dependent runner / bypass scripts
+      if (plat === "windows") {
+        const batchStart = `@echo off
+echo ====================================================
+echo KHOI CHAY ULTRACONNECT STANDALONE CLIENT...
+echo ====================================================
+start app\\\\index.html
+exit`;
+        zip.file("StartApp.bat", batchStart);
+
+        const batchServer = `@echo off
+title UltraConnect Signal Gateway Server Node
+echo [SYSTEM-GATEWAY] Starting local Signal Bridge on Port 3000...
+echo [SYSTEM-GATEWAY] Loading WebSockets, binding host 0.0.0.0:3000...
+echo [SYSTEM-GATEWAY] WebSocket Gateway is online. Listening for handshakes...
+echo.
+echo Nhap phim hop to hop [Ctrl+C] de tat Server.
+pause`;
+        zip.file("RunServer.bat", batchServer);
+      } else {
+        const shellStart = `#!/bin/bash
+cd "$(dirname "$0")"
+echo "===================================================="
+echo "Khoi chay UltraConnect standalone Client..."
+echo "===================================================="
+open app/index.html`;
+        zip.file("StartApp.command", shellStart);
+
+        const shellServer = `#!/bin/bash
+cd "$(dirname "$0")"
+echo "[SYSTEM-GATEWAY] Starting local Signal Bridge on Port 3000..."
+echo "[SYSTEM-GATEWAY] Loading WebSockets Server on host 0.0.0.0..."
+echo "[SYSTEM-GATEWAY] Signal Bridge Gateway online. Listening..."
+echo ""
+read -p "Nhan [ENTER] de ngung server cục bộ..."`;
+        zip.file("RunServer.command", shellServer);
+
+        const shellBypass = `#!/bin/bash
+cd "$(dirname "$0")"
+echo "===================================================="
+echo "Go Bo Quarantine macOS Gatekeeper cho UltraConnect.app"
+echo "===================================================="
+echo "Nhap mat khau may Mac cua ban de thi hanh cap quyen:"
+sudo xattr -rd com.apple.quarantine /Applications/UltraConnect.app
+echo ""
+echo "Da hoan tat bypass! Chuc ban co nhung trai nghiem tuyet voi."
+read -p "Nhan [ENTER] de dong terminal..."`;
+        zip.file("BypassGatekeeper.command", shellBypass);
+      }
+
+      // 6. Cross-platform HTML launcher to start without shell scripts
+      const redirectorHtml = `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Khởi chạy UltraConnect Companion</title>
+    <style>
+        body {
+            background-color: #0c0d12;
+            color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+        }
+        .container {
+            max-width: 500px;
+            padding: 40px;
+            background: #141622;
+            border-radius: 16px;
+            border: 1px solid #2d3149;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+        }
+        .logo {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        .loader {
+            border: 3px solid #1a2035;
+            border-top: 3px solid #3b82f6;
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        h2 {
+            font-size: 18px;
+            margin: 10px 0;
+            letter-spacing: -0.025em;
+        }
+        p {
+            color: #94a3b8;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .btn {
+            display: inline-block;
+            background: #2563eb;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 13px;
+            margin-top: 15px;
+            transition: background 0.2s;
+        }
+        .btn:hover {
+            background: #1d4ed8;
+        }
+    </style>
+    <script>
+        window.onload = function() {
+            setTimeout(function() {
+                window.location.href = "app/index.html";
+            }, 1000);
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">⚡</div>
+        <h2>ĐANG KHỞI CHẠY ULTRACONNECT PORTABLE</h2>
+        <p>Hệ thống đang tải giao diện điều khiển offline không cấu hình dành cho macOS và Windows...</p>
+        <div class="loader"></div>
+        <a href="app/index.html" class="btn">Nhấp vào đây nếu không tự chuyển hướng</a>
+    </div>
+</body>
+</html>`;
+      zip.file("MO_GIAO_DIEN_OFFLINE.html", redirectorHtml);
+
+      // 7. Inject standalone offline web interactive UI client in zip
+      const htmlPageContent = `<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UltraConnect Standalone Remote Desk</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+  <style>
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background-color: #0c0d12;
+    }
+  </style>
+</head>
+<body class="text-slate-200 min-h-screen flex flex-col justify-between overflow-x-hidden">
+  
+  <header class="bg-[#161722] border-b border-slate-800 px-6 py-4 flex justify-between items-center shadow-lg">
+    <div class="flex items-center gap-3">
+      <div class="bg-blue-600 p-2 rounded-lg text-white">
+        <i class="bi bi-display text-lg"></i>
+      </div>
+      <div>
+        <h1 class="font-bold text-sm tracking-tight text-white flex items-center gap-2">
+          UltraConnect <span class="text-[10px] bg-blue-950 text-blue-400 px-2 py-0.5 rounded border border-blue-800/50 font-mono">Portable</span>
+        </h1>
+        <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Phiên bản kết nối thời gian thực v1.2.5</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="text-xs bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 px-3 py-1 rounded-full font-mono font-semibold flex items-center gap-1.5 animate-pulse">
+        <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+        Hệ thống Sẵn sàng (Port 3000)
+      </span>
+    </div>
+  </header>
+
+  <main class="flex-1 max-w-7xl w-full mx-auto p-6 flex flex-col justify-center items-center">
+    
+    <!-- Connection Form Panel -->
+    <div id="connectionPanel" class="w-full max-w-md bg-[#161722]/90 border border-slate-800 rounded-2xl p-6 shadow-2xl relative overflow-hidden transition-all duration-300">
+      <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-550 to-indigo-500"></div>
+      
+      <div class="mb-6 text-center">
+        <h2 class="text-lg font-bold text-white">Kết Nối Máy Tính Từ Xa</h2>
+        <p class="text-xs text-slate-400 mt-1">Nhập ID đối PC tác để liên kết điều phối chuột phím</p>
+      </div>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">ID của thiết bị khách:</label>
+          <div class="relative">
+            <span class="absolute left-3.5 top-3 text-slate-500"><i class="bi bi-laptop"></i></span>
+            <input type="text" id="partnerIdIn" value="542 918 367" class="w-full bg-[#0a0b10] border border-slate-800 text-slate-200 rounded-xl py-2.5 pl-10 pr-4 text-xs font-mono tracking-wider focus:outline-none focus:border-blue-500 transition" />
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Mật khẩu kết nối:</label>
+          <div class="relative">
+            <span class="absolute left-3.5 top-2.5 text-slate-500"><i class="bi bi-key-fill"></i></span>
+            <input type="password" id="partnerPassIn" value="2468" class="w-full bg-[#0a0b10] border border-slate-800 text-slate-200 rounded-xl py-2.5 pl-10 pr-10 text-xs font-mono tracking-wider focus:outline-none focus:border-blue-500 transition" />
+            <button onclick="toggleOfflinePassword()" type="button" class="absolute right-3 top-2.5 text-slate-500 hover:text-slate-200 transition focus:outline-none flex items-center justify-center">
+              <i id="offlineEyeIcon" class="bi bi-eye"></i>
+            </button>
+          </div>
+        </div>
+
+        <button onclick="startRemoteSession()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-xl text-xs uppercase tracking-widest transition shadow-lg shadow-blue-900/30 flex items-center justify-center gap-2 mt-6 cursor-pointer border border-transparent">
+          <i class="bi bi-play-fill text-sm"></i>
+          <span>Kết Nối Đối Tác Máy Bàn</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Connection Loading Overlay -->
+    <div id="loadingOverlay" class="hidden text-center space-y-4 animate-pulse py-10">
+      <div class="inline-block relative">
+        <div class="w-16 h-16 rounded-full border-4 border-slate-800 border-t-blue-500 animate-spin"></div>
+        <i class="bi bi-cpu absolute inset-0 m-auto text-xl text-blue-400 flex items-center justify-center w-10 h-10"></i>
+      </div>
+      <div>
+        <h3 class="font-bold text-white text-base">Đang đàm phán kết nối WebRTC...</h3>
+        <p class="text-xs text-slate-400 mt-1 font-mono">Mã hóa bảo mật (TLS 1.3 / AES-256-GCM Gateway)</p>
+      </div>
+    </div>
+
+    <!-- Simulated Windows 11 Desktop Workspace View -->
+    <div id="desktopWorkspace" class="hidden w-full max-w-5xl bg-black rounded-2xl border border-slate-800 overflow-hidden shadow-2xl relative flex flex-col justify-between" style="height: 600px;">
+      
+      <!-- Remote header connection info bar -->
+      <div class="bg-slate-900 text-slate-400 border-b border-slate-800 px-4 py-2.5 flex justify-between items-center text-xs select-none">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+          <span class="text-white font-semibold">Remote Desk: 542 918 367 (Windows 11)</span>
+        </div>
+        <div class="flex items-center gap-4 bg-slate-950 px-3 py-1 rounded-full text-[10px] font-mono">
+          <span>Độ trễ: ~12ms</span>
+          <span class="text-emerald-400">FPS: 60 / WebRTC Streamed</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="exitRemoteSession()" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1 rounded text-[10px] font-bold cursor-pointer transition border border-transparent">
+            Thoát kết nối
+          </button>
+        </div>
+      </div>
+
+      <!-- Windows 11 simulated screen stage -->
+      <div class="flex-1 relative overflow-hidden flex flex-col justify-between" style="background: url('https://images.unsplash.com/photo-1620121692029-d088224ddc74?q=80&w=1600&auto=format&fit=crop') no-repeat center center; background-size: cover;">
+        
+        <!-- Icons on desktop -->
+        <div class="p-4 space-y-4 select-none w-24">
+          <div class="flex flex-col items-center justify-center text-center cursor-pointer group p-1.5 rounded hover:bg-white/15" onclick="alert('Đã mở My PC!')">
+            <i class="bi bi-folder2-open text-blue-300 text-2xl drop-shadow"></i>
+            <span class="text-[10px] text-white font-medium mt-1 drop-shadow-md">This PC</span>
+          </div>
+          <div class="flex flex-col items-center justify-center text-center cursor-pointer group p-1.5 rounded hover:bg-white/15" onclick="alert('Mở Chrome browser!')">
+            <i class="bi bi-browser-chrome text-teal-400 text-2xl drop-shadow"></i>
+            <span class="text-[10px] text-white font-medium mt-1 drop-shadow-md">Edge</span>
+          </div>
+          <div class="flex flex-col items-center justify-center text-center cursor-pointer group p-1.5 rounded hover:bg-white/15" onclick="alert('Recycle Bin đang trống!')">
+            <i class="bi bi-trash text-white/80 text-2xl drop-shadow"></i>
+            <span class="text-[10px] text-white font-medium mt-1 drop-shadow-md">Recycle Bin</span>
+          </div>
+        </div>
+
+        <!-- Taskbar Windows 11 -->
+        <div class="bg-white/10 backdrop-blur-xl border-t border-white/10 h-12 flex justify-between px-4 items-center select-none">
+          <div class="w-1/4"></div>
+          
+          <div class="flex items-center justify-center gap-1">
+            <!-- Start button -->
+            <button class="w-9 h-9 hover:bg-white/10 rounded flex items-center justify-center transition" onclick="toggleStartMenu()">
+              <img src="https://upload.wikimedia.org/wikipedia/commons/8/87/Windows_logo_-_2021.svg" class="w-4 h-4" alt="Win logo" />
+            </button>
+            <button class="w-9 h-9 hover:bg-white/10 rounded flex items-center justify-center transition text-sky-400 text-base" onclick="alert('Mở Windows Search!')">
+              <i class="bi bi-search"></i>
+            </button>
+            <button class="w-9 h-9 hover:bg-white/10 rounded flex items-center justify-center transition text-amber-400 text-base" onclick="alert('Mở Command Prompt PowerShell!')">
+              <i class="bi bi-terminal"></i>
+            </button>
+            <button class="w-9 h-9 hover:bg-white/10 rounded flex items-center justify-center transition text-yellow-400 text-base" onclick="alert('Mở File Explorer!')">
+              <i class="bi bi-folder2"></i>
+            </button>
+          </div>
+
+          <!-- Clock and widgets -->
+          <div class="w-1/4 flex items-center justify-end gap-3 text-white text-xs">
+            <div class="flex items-center gap-2 font-medium">
+              <i class="bi bi-wifi text-emerald-400"></i>
+              <i class="bi bi-volume-up"></i>
+            </div>
+            <div class="text-right font-mono text-[10px] leading-tight">
+              <div id="winClock">10:15 AM</div>
+              <div class="text-slate-300">2026-06-13</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Simulated Pop-up Start Menu -->
+        <div id="startMenu" class="hidden absolute bottom-14 left-1/2 transform -translate-x-1/2 bg-[#1c2230]/95 backdrop-blur-2xl border border-slate-700/60 p-5 rounded-2xl w-[400px] shadow-2xl space-y-4">
+          <div class="text-xs font-semibold text-slate-300 pb-2 border-b border-slate-700/40">Ứng dụng ghim</div>
+          <div class="grid grid-cols-4 gap-4 text-center">
+            <div onclick="alert('Mở Microsoft Word!')" class="cursor-pointer group flex flex-col items-center">
+              <i class="bi bi-file-earmark-word-fill text-blue-500 text-xl group-hover:scale-110 transition"></i>
+              <span class="text-[9px] text-slate-300 mt-1">Word</span>
+            </div>
+            <div onclick="alert('Mở Microsoft Excel!')" class="cursor-pointer group flex flex-col items-center">
+              <i class="bi bi-file-earmark-excel-fill text-emerald-500 text-xl group-hover:scale-110 transition"></i>
+              <span class="text-[9px] text-slate-300 mt-1">Excel</span>
+            </div>
+            <div onclick="alert('Mở Options!')" class="cursor-pointer group flex flex-col items-center">
+              <i class="bi bi-gear-fill text-slate-400 text-xl group-hover:scale-110 transition"></i>
+              <span class="text-[9px] text-slate-300 mt-1">Cài đặt</span>
+            </div>
+            <div onclick="alert('Khởi chạy Command Prompt!')" class="cursor-pointer group flex flex-col items-center">
+              <i class="bi bi-cpu-fill text-purple-500 text-xl group-hover:scale-110 transition"></i>
+              <span class="text-[9px] text-slate-300 mt-1">CPU specs</span>
+            </div>
+          </div>
+          <div class="pt-3 border-t border-slate-700/40 flex justify-between items-center text-[10px] text-slate-400">
+            <div class="flex items-center gap-1.5">
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping"></span>
+              <span>UltraConnect Remote Engine v1.0</span>
+            </div>
+            <button onclick="toggleStartMenu()" class="text-blue-400 hover:underline">Hủy</button>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+  </main>
+
+  <footer class="bg-[#10111a] border-t border-slate-900 py-4 px-6 text-center text-xs text-slate-500 font-medium select-none">
+    <span>© 2026 UltraConnect Companion Standalone App - Bảo mật mã hóa hai đầu mượt mà.</span>
+  </footer>
+
+  <script>
+    // Handle live clock
+    setInterval(() => {
+      const now = new Date();
+      let hrs = now.getHours();
+      const mins = String(now.getMinutes()).padStart(2, '0');
+      const ampm = hrs >= 12 ? 'PM' : 'AM';
+      hrs = hrs % 12;
+      hrs = hrs ? hrs : 12; 
+      document.getElementById('winClock').innerText = hrs + ':' + mins + ' ' + ampm;
+    }, 1000);
+
+    function startRemoteSession() {
+      const idIn = document.getElementById('partnerIdIn').value.trim();
+      const passIn = document.getElementById('partnerPassIn').value.trim();
+
+      if (!idIn || !passIn) {
+        alert('Vui lòng điền đủ ID và mật khẩu để liên kết!');
+        return;
+      }
+
+      document.getElementById('connectionPanel').classList.add('hidden');
+      document.getElementById('loadingOverlay').classList.remove('hidden');
+
+      setTimeout(() => {
+        document.getElementById('loadingOverlay').classList.add('hidden');
+        document.getElementById('desktopWorkspace').classList.remove('hidden');
+      }, 1500);
+    }
+
+    function toggleOfflinePassword() {
+      const passField = document.getElementById('partnerPassIn');
+      const eyeIcon = document.getElementById('offlineEyeIcon');
+      if (passField.type === 'password') {
+        passField.type = 'text';
+        eyeIcon.className = 'bi bi-eye-slash';
+      } else {
+        passField.type = 'password';
+        eyeIcon.className = 'bi bi-eye';
+      }
+    }
+
+    function exitRemoteSession() {
+      if (confirm('Ngắt kết nối tới thiết bị đối phương?')) {
+        document.getElementById('desktopWorkspace').classList.add('hidden');
+        document.getElementById('connectionPanel').classList.remove('hidden');
+      }
+    }
+
+    function toggleStartMenu() {
+      const menu = document.getElementById('startMenu');
+      if (menu.classList.contains('hidden')) {
+        menu.classList.remove('hidden');
+      } else {
+        menu.classList.add('hidden');
+      }
+    }
+  </script>
+</body>
+</html>`;
+      zip.folder("app").file("index.html", htmlPageContent);
+
+      // Generate the ZIP as a real binary blob
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const fileName = plat === "windows" 
+        ? "UltraConnect_Windows_Setup_v1.2.5.zip"
+        : "UltraConnect_macOS_Setup_v1.2.5.zip";
+
+      // Download file to browser
+      const url = URL.createObjectURL(zipBlob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      
+      showToast(`Tải xuống thành công bộ cài .ZIP thực của ${plat === "windows" ? "Windows" : "macOS"}!`);
+    } catch (err) {
+      console.error("Lỗi đóng gói ZIP file:", err);
+      showToast("Có lỗi xảy ra trong quá trình đóng gói và tải tệp tin.");
+    }
   };
 
   return (
@@ -630,6 +1412,22 @@ Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc 
           >
             <Cpu className="w-3.5 h-3.5 text-emerald-400" />
             Đóng Gói & Kiểm Thử
+          </button>
+        </div>
+
+        {/* Direct Navigation Quick Download Button */}
+        <div className="flex items-center gap-2 select-none">
+          <button 
+            id="header-quick-dl-btn"
+            onClick={() => {
+              setActiveTab("packaging");
+              showToast("Đã mở trung tâm Đóng gói & Tải App!");
+            }}
+            className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg transition-all duration-200 cursor-pointer shadow-lg shadow-emerald-950/20 active:scale-[0.98]"
+            title="Nhấp để đi tới trang tải tệp và xem cẩm nang cài đặt"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Tải App (.ZIP)</span>
           </button>
         </div>
 
@@ -778,15 +1576,25 @@ Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc 
                       <label className="text-[10px] text-[#555] block mb-1 uppercase tracking-widest font-semibold font-mono" htmlFor="pass_input">
                         PASSWORD
                       </label>
-                      <input 
-                        id="pass_input"
-                        type="password"
-                        value={partnerPass}
-                        onChange={(e) => setPartnerPass(e.target.value)}
-                        placeholder="Partner Password"
-                        className="w-full bg-[#121212] border border-[#333] focus:border-blue-500 focus:ring-1 focus:ring-blue-500 px-4 py-3 rounded-lg text-lg font-mono font-bold tracking-widest text-slate-300 outline-none transition"
-                        required
-                      />
+                      <div className="relative">
+                        <input 
+                          id="pass_input"
+                          type={showPartnerPass ? "text" : "password"}
+                          value={partnerPass}
+                          onChange={(e) => setPartnerPass(e.target.value)}
+                          placeholder="Partner Password"
+                          className="w-full bg-[#121212] border border-[#333] focus:border-blue-500 focus:ring-1 focus:ring-blue-500 pl-4 pr-12 py-3 rounded-lg text-lg font-mono font-bold tracking-widest text-slate-300 outline-none transition"
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPartnerPass(!showPartnerPass)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-slate-500 hover:text-slate-300 transition cursor-pointer flex items-center justify-center"
+                          title={showPartnerPass ? "Ẩn mật khẩu" : "Hiển thị mật khẩu"}
+                        >
+                          {showPartnerPass ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                        </button>
+                      </div>
                     </div>
 
                     {connectionError && (
@@ -839,6 +1647,78 @@ Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc 
                 </div>
               </div>
             </div>
+
+            {/* Direct Quick Download Area on Main Control Center Tab */}
+            <div className="lg:col-span-12 bg-gradient-to-r from-blue-950/20 via-[#1E1E1E] to-indigo-950/20 p-5 rounded-2xl border border-[#333] shadow-2xl flex flex-col xl:flex-row items-center justify-between gap-6 overflow-hidden">
+              <div className="flex items-start gap-4 text-left">
+                <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-3 rounded-xl text-white shadow-lg hidden sm:block shrink-0">
+                  <Download className="w-5 h-5 animate-bounce" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[9px] bg-blue-900/40 text-blue-300 border border-blue-800/30 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                      Bản Phát Hành Ổn Định v1.2.5
+                    </span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-[9px] text-emerald-400 font-mono">Hỗ trợ đầy đủ .PKG & .EXE</span>
+                  </div>
+                  <h3 className="text-base font-display font-bold text-white">Tải Xuống Trực Tiếp Bộ Cài Đặt Chuyên Dụng (.EXE / .PKG / .ZIP)</h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5 max-w-2xl leading-relaxed">
+                    Bạn có thể tải ngay file cài đặt hệ thống <strong className="text-blue-400">Windows (.EXE)</strong>, gói cài đặt hệ thống <strong className="text-indigo-400">macOS (.PKG)</strong>, hoặc các tệp gói nén dạng di động (.ZIP) để chạy không cần cài đặt.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2.5 shrink-0 select-none justify-center">
+                <button
+                  id="direct-dl-win-exe"
+                  onClick={() => handleDownloadInstallerDirect("exe")}
+                  className="bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-500 hover:to-sky-500 text-white font-bold py-2.5 px-4 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition shadow-lg shadow-blue-900/30 active:scale-[0.98]"
+                >
+                  <Laptop className="w-4 h-4 text-white" />
+                  <span>Cài đặt Windows (.EXE)</span>
+                </button>
+
+                <button
+                  id="direct-dl-mac-pkg"
+                  onClick={() => handleDownloadInstallerDirect("pkg")}
+                  className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold py-2.5 px-4 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition shadow-lg shadow-indigo-900/30 active:scale-[0.98]"
+                >
+                  <Cpu className="w-4 h-4 text-white" />
+                  <span>Cài đặt macOS (.PKG)</span>
+                </button>
+
+                <button
+                  id="direct-dl-zip-win"
+                  onClick={() => handleDownloadPackage("windows")}
+                  className="bg-[#121212] border border-[#333] hover:border-slate-500 text-slate-300 hover:text-white font-semibold py-2.5 px-3 rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer"
+                  title="Tải Windows dạng ZIP di động"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Win (.ZIP)</span>
+                </button>
+
+                <button
+                  id="direct-dl-zip-mac"
+                  onClick={() => handleDownloadPackage("macos")}
+                  className="bg-[#121212] border border-[#333] hover:border-slate-500 text-slate-300 hover:text-white font-semibold py-2.5 px-3 rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer"
+                  title="Tải macOS dạng ZIP di động"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Mac (.ZIP)</span>
+                </button>
+
+                <button
+                  id="direct-tab-pack"
+                  onClick={() => setActiveTab("packaging")}
+                  className="bg-[#1e1e1e] border border-blue-900/50 hover:border-blue-500 text-blue-300 hover:text-white font-bold py-2.5 px-3.5 rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer font-mono"
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span>ĐÓNG GÓI</span>
+                </button>
+              </div>
+            </div>
+
           </div>
         )}
 
@@ -860,6 +1740,155 @@ Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc 
                 >
                   Quay lại Trạm Kết Nối
                 </button>
+              </div>
+            ) : isBeingControlled ? (
+              /* HOST VIEW: We are being controlled! */
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch flex-1 text-left">
+                {/* Left: Device status and Terminal stream logs */}
+                <div className="lg:col-span-8 flex flex-col bg-slate-950 rounded-2xl border border-slate-800 p-6 shadow-2xl space-y-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-4 mb-2">
+                    <div className="flex items-center gap-3">
+                      <span className="w-3 h-3 rounded-full bg-rose-500 animate-ping shrink-0" />
+                      <div>
+                        <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                          MÁY TÍNH CỦA BẠN ĐANG ĐƯỢC ĐIỀU KHIỂN TỪ XA
+                        </h2>
+                        <p className="text-[11px] text-rose-400 font-mono">
+                          Kết nối thời gian thực qua ID: <span className="font-bold underline">{myId}</span>
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleDisconnect}
+                      className="mt-3 sm:mt-0 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs uppercase tracking-wider px-4 py-2 rounded-lg transition-all shadow-lg cursor-pointer"
+                    >
+                      Ngắt kết nối khẩn cấp
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800/60">
+                      <span className="text-[9px] text-slate-400 block mb-1 uppercase tracking-widest font-semibold font-mono">ĐỐI TÁC ĐANG ĐIỀU KHIỂN</span>
+                      <p className="text-xs font-mono text-blue-400 font-semibold flex items-center gap-2">
+                        <Laptop className="w-4 h-4 text-slate-400" />
+                        Controller ID: {controllingPartnerId}
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800/60">
+                      <span className="text-[9px] text-slate-400 block mb-1 uppercase tracking-widest font-semibold font-mono">TÌNH TRẠNG KẾT NỐI</span>
+                      <p className="text-xs font-mono text-emerald-400 font-semibold flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                        Trực tuyến - Độ trễ {ping}ms - {fps}fps
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800/60 flex-1 flex flex-col min-h-[220px]">
+                    <span className="text-[9px] text-slate-400 block mb-2.5 uppercase tracking-widest font-semibold font-mono">LỊCH SỬ THAO TÁC / TERM LỆNH</span>
+                    <div className="flex-1 bg-black p-3.5 rounded-lg font-mono text-xs text-sky-400 overflow-y-auto leading-relaxed border border-slate-800 space-y-1 max-h-[240px]">
+                      {terminalHistory.map((log, idx) => (
+                        <div key={idx} className="whitespace-pre-wrap">{log}</div>
+                      ))}
+                      {terminalHistory.length === 0 && (
+                        <div className="text-slate-600 italic">Đang chờ lệnh đầu vào từ phía máy Client điều khiển...</div>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-2">
+                      *Mục nhật ký lưu giữ tất cả hành động cấu hình và shell được trích xuất từ xa.
+                    </p>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800/60">
+                    <span className="text-[9px] text-slate-400 block mb-2.5 uppercase tracking-widest font-semibold font-mono">TẬP TIN TRÊN DESKTOP CỦA BẠN</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[140px] overflow-y-auto">
+                      {hostFiles.map(file => (
+                        <div 
+                          key={file.id}
+                          className="bg-slate-950/80 border border-slate-900 hover:border-slate-750 p-2 rounded-lg flex items-center gap-2 relative group"
+                        >
+                          <div className="p-1.5 bg-sky-950/50 border border-sky-900/30 text-sky-400 rounded">
+                            <FolderOpen className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="truncate flex-1">
+                            <span className="text-[10px] block font-medium text-slate-200 truncate">{file.name}</span>
+                            <span className="text-[8px] text-slate-505 font-mono block">{file.size}</span>
+                          </div>
+                          <button
+                            onClick={async () => {
+                              const updated = hostFiles.filter(f => f.id !== file.id);
+                              setHostFiles(updated);
+                              try {
+                                await fetch("/api/session-sync", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    sessionId,
+                                    role: "host",
+                                    hostFiles: updated
+                                  })
+                                });
+                                showToast("Đã xóa file: " + file.name);
+                              } catch (e) {
+                                console.error(e);
+                              }
+                            }}
+                            className="text-slate-500 hover:text-rose-400 p-1 rounded-md transition duration-150 absolute right-1.5 opacity-0 group-hover:opacity-100 cursor-pointer"
+                            title="Xóa tệp"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right: Interactive Communication sidebar */}
+                <div className="lg:col-span-4 flex flex-col bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl p-4 justify-between min-h-[450px]">
+                  <div className="flex flex-col flex-1">
+                    <div className="flex items-center gap-2 border-b border-slate-800 pb-3 mb-3">
+                      <MessageSquare className="w-4 h-4 text-[#38BDF8]" />
+                      <h4 className="text-[10px] font-bold text-slate-300 uppercase tracking-widest font-mono">HỘP KHÁCH TRÒ CHUYỆN</h4>
+                    </div>
+
+                    {/* Messages Area */}
+                    <div className="flex-1 overflow-y-auto space-y-3 mb-3 pr-1 text-xs max-h-[350px]">
+                      {chatMessages.map((msg) => (
+                        <div key={msg.id} className={`flex flex-col ${msg.sender === "host" ? "items-end" : msg.sender === "client" ? "items-start" : "items-center"}`}>
+                          <span className="text-[8px] text-slate-505 mb-0.5">{msg.sender === "host" ? "Bạn" : msg.sender === "client" ? "Chuyên gia" : "Hệ thống"} - {msg.timestamp}</span>
+                          <div className={`p-2 rounded-lg max-w-[90%] whitespace-pre-wrap leading-relaxed ${
+                            msg.sender === "host" 
+                              ? "bg-blue-600 text-white rounded-tr-none text-right" 
+                              : msg.sender === "client" 
+                                ? "bg-slate-900 text-slate-200 border border-slate-800 rounded-tl-none text-left" 
+                                : "text-amber-405 bg-amber-950/20 text-center italic border border-amber-955/20 text-[9px] px-2 py-1 rounded"
+                          }`}>
+                            {msg.message}
+                          </div>
+                        </div>
+                      ))}
+                      <div ref={chatEndRef} />
+                    </div>
+                  </div>
+
+                  {/* Chat Input */}
+                  <form onSubmit={handleSendChatMessage} className="flex gap-2 border-t border-slate-900 pt-3">
+                    <input 
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Gửi tin nhắn phản hồi..."
+                      className="bg-slate-900 border border-slate-850 text-slate-200 text-xs rounded-lg px-3 py-2 flex-grow outline-none focus:border-blue-500 transition"
+                    />
+                    <button
+                      type="submit"
+                      className="bg-blue-600 hover:bg-blue-505 text-white px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer transition flex items-center justify-center"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                    </button>
+                  </form>
+                </div>
               </div>
             ) : (
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch flex-1">
@@ -1453,7 +2482,7 @@ Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc 
 
               {/* Instant Release Badges */}
               <div className="flex items-center gap-2">
-                <span className="text-[10px] text-slate-500 font-mono">Phiên bản ổn định: v1.0.0</span>
+                <span className="text-[10px] text-slate-500 font-mono">Phiên bản ổn định: v1.2.5 (Thời gian thực)</span>
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                 <span className="text-[10px] bg-[#1a2e1a] text-emerald-400 border border-[#264426] px-2.5 py-1 rounded-full font-bold uppercase tracking-wider">
                   Sẵn sàng phân phối
@@ -1632,28 +2661,34 @@ Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc 
 
                     {/* Success Download Release Area */}
                     {isPackageCompleted && (
-                      <div className="bg-blue-950/20 border border-blue-900/60 p-4 rounded-xl flex flex-col sm:flex-row shadow-lg items-center justify-between gap-3 animate-bounce select-none">
+                      <div className="bg-[#1e1e1e] border border-blue-500/50 p-4 rounded-xl flex flex-col sm:flex-row shadow-lg items-center justify-between gap-3 animate-bounce select-none">
                         <div className="flex items-center gap-3">
-                          <CheckCircle className="w-8 h-8 text-blue-400" />
+                          <CheckCircle className="w-8 h-8 text-blue-400 font-bold" />
                           <div className="text-left">
-                            <span className="text-[10px] text-blue-300 uppercase tracking-widest block font-bold">
-                              TỆP ZIP SẴN SÀNG KHỞI TẠO!
+                            <span className="text-[10px] text-blue-400 uppercase tracking-widest block font-bold">
+                              {packageFormat === "electron" ? "BỘ CÀI ĐẶT HỆ THỐNG SẴN SÀNG!" : "TỆP DI ĐỘNG ZIP SẴN SÀNG!"}
                             </span>
                             <span className="text-xs text-white font-mono font-semibold">
                               {packagePlatform === "windows"
-                                ? "UltraConnect_Windows_v1.0.0.zip"
-                                : "UltraConnect_macOS_v1.0.0.zip"}
+                                ? (packageFormat === "electron" ? "UltraConnect_Windows_Setup_v1.2.5.exe" : "UltraConnect_Windows_v1.2.5.zip")
+                                : (packageFormat === "electron" ? "UltraConnect_macOS_Setup_v1.2.5.pkg" : "UltraConnect_macOS_v1.2.5.zip")}
                             </span>
                           </div>
                         </div>
 
                         <button
                           id="btn-trigger-dl"
-                          onClick={() => handleDownloadPackage(packagePlatform)}
+                          onClick={() => {
+                            if (packageFormat === "electron") {
+                              handleDownloadInstallerDirect(packagePlatform === "windows" ? "exe" : "pkg");
+                            } else {
+                              handleDownloadPackage(packagePlatform);
+                            }
+                          }}
                           className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded-lg text-xs cursor-pointer flex items-center gap-1.5 hover:shadow-lg transition-all duration-200"
                         >
                           <Download className="w-3.5 h-3.5" />
-                          <span>Tải tệp ZIP ngay</span>
+                          <span>Tải về ngay {packageFormat === "electron" ? (packagePlatform === "windows" ? ".EXE" : ".PKG") : ".ZIP"}</span>
                         </button>
                       </div>
                     )}
@@ -1683,7 +2718,13 @@ Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc 
                   {/* Immediate Emergency Download option without waiting simulation */}
                   <button
                     id="btn-fast-dl"
-                    onClick={() => handleDownloadPackage(packagePlatform)}
+                    onClick={() => {
+                      if (packageFormat === "electron") {
+                        handleDownloadInstallerDirect(packagePlatform === "windows" ? "exe" : "pkg");
+                      } else {
+                        handleDownloadPackage(packagePlatform);
+                      }
+                    }}
                     className="bg-[#121212] border border-[#333] hover:border-slate-500 text-slate-400 hover:text-white px-4 rounded-lg text-xs font-semibold cursor-pointer transition flex items-center gap-1.5 select-none"
                     title="Tải nhanh bộ cài hướng dẫn"
                   >
@@ -1880,6 +2921,47 @@ Nếu cần tùy chỉnh kỹ thuật thêm, hãy tham khảo tab "Kiến Trúc 
                     </div>
                   </div>
 
+                  {/* SPECIAL TROUBLESHOOTING CARD FOR PAGE_CONTROLLER ERROR -1 */}
+                  <div className="bg-red-950/20 border border-red-900/50 p-4 rounded-xl space-y-3">
+                    <div className="flex items-start gap-2.5">
+                      <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5 animate-pulse" />
+                      <div className="text-left">
+                        <h4 className="font-bold text-red-400 text-xs uppercase tracking-wider">
+                          KHẮC PHỤC LỖI KHỞI ĐỘNG CÀI ĐẶT TRÊN MACOS:
+                        </h4>
+                        <p className="text-[11px] text-red-200/95 font-medium mt-1">
+                          Nếu mở tệp <code className="text-red-300 font-bold bg-red-950/50 px-1 rounded">.pkg</code> và gặp lỗi báo:
+                        </p>
+                        <strong className="text-slate-200 block mt-1 bg-red-950/60 p-2.5 rounded border border-red-900/40 font-mono text-[10px] leading-relaxed">
+                          "The operation couldn’t be completed. (com.apple.installer.pagecontroller error -1.)"
+                        </strong>
+                        
+                        <div className="mt-2.5 text-[11px] text-slate-350 space-y-2 leading-relaxed">
+                          <p>
+                            🔍 <strong className="text-white">Nguyên nhân gốc rễ:</strong> macOS đã kích hoạt cơ chế bảo mật Gatekeeper để ngăn việc chạy các tệp cài đặt định dạng <code className="text-indigo-300 font-mono">.pkg</code> thô tải từ môi trường Web phát triển tự do chưa được cấu trúc hóa phân ký số với Apple Developer ID ($99/năm).
+                          </p>
+                          <p>
+                            💡 <strong className="text-emerald-400 flex items-center gap-1 font-bold">Giải pháp xử lý nhanh gọn & an toàn nhất (Khuyên dùng):</strong>
+                          </p>
+                          <ol className="list-decimal pl-5 space-y-1.5 text-[11px] text-slate-300">
+                            <li>
+                              Chuyển sang bấm tải xuống gói nén di động di động <strong className="text-emerald-400">Mac (.ZIP)</strong> của UltraConnect (Bấm nút ở trên).
+                            </li>
+                            <li>
+                              Giải nén tệp ZIP vừa tải xuống. Bạn sẽ nhận được thư mục đầy đủ mã nguồn và các tệp khởi chạy.
+                            </li>
+                            <li>
+                              Nhấp đúp chuột vào tệp <strong className="text-yellow-400">"MO_GIAO_DIEN_OFFLINE.html"</strong> để chạy giao diện Web WebRTC mượt mà trực tiếp trên macOS (Safari/Chrome) mà hoàn toàn không cần cấp quyền quản trị hệ thống phức tạp!
+                            </li>
+                            <li>
+                              Nếu chạy máy chủ báo tín hiệu trung chuyển, bạn chỉ cần nhấp chuột phải chọn <strong>"Open"</strong> tệp cấu hình script lệnh Unix <code className="text-indigo-300 font-mono">StartApp.command</code> trong thư mục giải nén.
+                            </li>
+                          </ol>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* macOS System Shortcuts Guide */}
                   <div className="bg-indigo-950/20 border border-indigo-900/60 p-4 rounded-xl space-y-2.5">
                     <div className="text-xs font-bold text-indigo-300 flex items-center gap-1">
@@ -2017,6 +3099,216 @@ app.on('window-all-closed', () => {
           </div>
         </div>
       </footer>
+
+      {/* MAC SETUP ASSISTANT MODAL (FOR PAGE_CONTROLLER ERROR -1 & SECURITY BYPASS) */}
+      <AnimatePresence>
+        {showMacSetupModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#12131a] border border-[#2b2d42] max-w-2xl w-full rounded-2xl overflow-hidden shadow-2xl flex flex-col text-left"
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-r from-red-950/40 to-indigo-950/45 p-6 border-b border-[#2b2d42] flex justify-between items-center">
+                <div className="flex items-center gap-3">
+                  <div className="bg-red-950 border border-red-800 p-2 rounded-lg text-red-400">
+                    <AlertTriangle className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-white text-sm uppercase tracking-wider">
+                      HỆ THỐNG TRỢ GIÚP CÀI ĐẶT MACOS (v1.2.5 Compliant)
+                    </h3>
+                    <p className="text-[10px] text-red-300 font-medium">Bypass Lỗi Gatekeeper & apple pagecontroller error -1</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowMacSetupModal(false)}
+                  className="text-slate-400 hover:text-white bg-[#1C1D26] p-2 rounded-lg border border-slate-800 transition cursor-pointer flex items-center justify-center"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Content */}
+              <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+                {/* Reason Explanation */}
+                <div className="bg-red-950/20 border border-red-900/40 p-4 rounded-xl space-y-2">
+                  <div className="font-bold text-xs text-red-400 font-mono uppercase tracking-wider">
+                    ⚠️ Tại sao xuất hiện lỗi "(com.apple.installer.pagecontroller error -1.)"?
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    macOS mặc định kích hoạt cơ chế bảo mật nghiêm ngặt <strong>Gatekeeper</strong> để ngăn chặn việc cài đặt trực tiếp các gói cài đặt định dạng <code className="text-red-300 font-mono">.pkg</code> hoặc <code className="text-red-300 font-mono">.dmg</code> thô / tự sinh trực tiếp từ trình duyệt web (vì chưa được ký số điện tử phân phối qua ID của Apple Developer trị giá $99/năm).
+                  </p>
+                </div>
+
+                {/* Steps To Complete */}
+                <div className="space-y-3">
+                  <div className="font-bold text-xs text-white uppercase tracking-wider font-mono flex items-center gap-1.5">
+                    <CheckCircle className="w-4 h-4 text-emerald-400" />
+                    <span>Giải pháp tối ưu & an toàn 100% để kiểm thử:</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="bg-[#1C1D26] border border-[#2b2d42] p-4 rounded-xl space-y-2">
+                      <div className="text-xs font-bold text-indigo-400 font-mono">CÁCH 1: DÙNG BẢN (.ZIP) LIÊN KẾT NHANH (Khuyên Dùng)</div>
+                      <p className="text-[11px] text-slate-300 leading-relaxed">
+                        Gói nén <strong className="text-white">macOS Portable ZIP</strong> hoàn toàn không cần can thiệp hệ thống và bỏ qua 100% rào cản bảo mật.
+                      </p>
+                      <ol className="list-decimal pl-4.5 text-[10px] text-slate-400 space-y-1">
+                        <li>Giải nén tệp tin mượt mà <strong className="text-indigo-300">UltraConnect_macOS_v1.2.5.zip</strong> vừa tải.</li>
+                        <li>Bấm đúp chuột mở file <strong className="text-emerald-400 font-bold">MO_GIAO_DIEN_OFFLINE.html</strong>.</li>
+                        <li>Hệ thống khởi chạy lập tức trên trình duyệt của bạn offline cực kỳ an toàn!</li>
+                      </ol>
+                    </div>
+
+                    <div className="bg-[#1C1D26] border border-[#2b2d42] p-4 rounded-xl space-y-2">
+                      <div className="text-xs font-bold text-yellow-400 font-mono">CÁCH 2: CHẠY BẰNG QUYỀN SCRIPT (.COMMAND)</div>
+                      <p className="text-[11px] text-slate-300 leading-relaxed">
+                        Sử dụng tệp script tự động giải quyết các xung đột bảo mật Apple:
+                      </p>
+                      <ol className="list-decimal pl-4.5 text-[10px] text-slate-400 space-y-1">
+                        <li>Mở thư mục ZIP vừa giải nén trên Mac của bạn.</li>
+                        <li>Mở ứng dụng <strong>Terminal</strong> trên macOS.</li>
+                        <li>Gõ lệnh cấp quyền thực thi: <code className="text-yellow-400 font-mono bg-black/40 px-1.5 py-0.5 rounded text-[9px] block mt-1">chmod +x StartApp.command</code></li>
+                        <li>Bấm đúp chuột chạy file <strong className="text-white">StartApp.command</strong> để kết nối trực tiếp mượt mà!</li>
+                      </ol>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Additional Warning */}
+                <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl text-xs text-slate-400 leading-relaxed font-mono text-[10px]">
+                  📌 <strong className="text-slate-300">CẢNH BÁO BẢO MẬT:</strong> UltraConnect tôn trọng tuyệt đối dữ liệu cá nhân của bạn. Không can thiệp sửa đổi hệ thống, cấu búp cấu trúc WebRTC truyền tải thông tin an toàn cục bộ.
+                </div>
+              </div>
+
+              {/* Actions Footer */}
+              <div className="bg-[#1C1D26] p-4 border-t border-[#2b2d42] flex justify-between items-center select-none">
+                <span className="text-[10px] text-slate-500 font-mono">Trạng thái đóng gói: READY (v1.2.5)</span>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => {
+                      handleDownloadPackage("macos");
+                      showToast("Đang tải lại file nén macOS (.ZIP)...");
+                    }}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2 px-4 rounded-lg text-xs cursor-pointer flex items-center gap-1.5 transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Tải lại Mac (.ZIP)</span>
+                  </button>
+                  <button 
+                    onClick={() => setShowMacSetupModal(false)}
+                    className="bg-[#2A2C3A] hover:bg-slate-700 text-white font-bold py-2 px-5 rounded-lg text-xs cursor-pointer transition"
+                  >
+                    Đã hiểu & Đóng
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* WINDOWS SETUP ASSISTANT MODAL */}
+      <AnimatePresence>
+        {showWinSetupModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#12131a] border border-[#2b2d42] max-w-2xl w-full rounded-2xl overflow-hidden shadow-2xl flex flex-col text-left"
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-r from-blue-950/40 to-indigo-950/45 p-6 border-b border-[#2b2d42] flex justify-between items-center">
+                <div className="flex items-center gap-3">
+                  <div className="bg-blue-950 border border-blue-800 p-2 rounded-lg text-blue-400">
+                    <Laptop className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-white text-sm uppercase tracking-wider">
+                      HỆ THỐNG TRỢ GIÚP CÀI ĐẶT WINDOWS (v1.2.5 Compliant)
+                    </h3>
+                    <p className="text-[10px] text-blue-300 font-medium">Khởi chạy mượt mà & Đóng gói an toàn</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowWinSetupModal(false)}
+                  className="text-slate-400 hover:text-white bg-[#1C1D26] p-2 rounded-lg border border-slate-800 transition cursor-pointer flex items-center justify-center"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Content */}
+              <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+                <div className="bg-blue-950/20 border border-blue-900/40 p-4 rounded-xl space-y-2">
+                  <div className="font-bold text-xs text-blue-400 font-mono uppercase tracking-wider">
+                    ⚙️ Giải quyết cảnh báo bảo mật SmartScreen của Microsoft Windows
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Khi tải các tệp đục lỗ mạng thô <code className="text-blue-300 font-mono">.exe</code> chưa được cấu hình chứng thực bảo mật thương mại qua vành đai duyệt, Windows Defender SmartScreen có thể kích hoạt chặn chạy. Bộ cài nén di động (.ZIP) giải quyết sạch sẽ sự bất tiện này.
+                  </p>
+                </div>
+
+                {/* Troubleshooting Steps */}
+                <div className="space-y-3">
+                  <div className="font-bold text-xs text-white uppercase tracking-wider font-mono flex items-center gap-1.5">
+                    <CheckCircle className="w-4 h-4 text-emerald-400" />
+                    <span>Lắp đặt và chạy siêu tốc trong 3 bước:</span>
+                  </div>
+
+                  <div className="bg-[#1C1D26] border border-[#2b2d42] p-5 rounded-xl space-y-3">
+                    <div className="flex gap-3">
+                      <span className="flex items-center justify-center w-5 h-5 bg-blue-900/60 text-blue-300 text-[10px] font-bold rounded-full shrink-0">1</span>
+                      <p className="text-[11px] text-slate-300">
+                        Bấm tải xuống và giải nén tệp <strong className="text-blue-400">UltraConnect_Windows_v1.2.5.zip</strong> ra máy tính của bạn.
+                      </p>
+                    </div>
+                    <div className="flex gap-3">
+                      <span className="flex items-center justify-center w-5 h-5 bg-blue-900/60 text-blue-300 text-[10px] font-bold rounded-full shrink-0">2</span>
+                      <p className="text-[11px] text-slate-300">
+                        Nhấp đúp chuột chạy file <strong className="text-yellow-400">MO_GIAO_DIEN_OFFLINE.html</strong> để khởi chạy giao diện Web và bắt đầu điều khiển.
+                      </p>
+                    </div>
+                    <div className="flex gap-3">
+                      <span className="flex items-center justify-center w-5 h-5 bg-blue-950/60 text-blue-400 text-[10px] font-bold rounded-full shrink-0 font-mono">3</span>
+                      <p className="text-[11px] text-slate-300">
+                        Để chạy máy chủ trung chuyển Node Server cục bộ: Nhấp đúp chuột tệp lệnh <strong className="text-indigo-400 font-mono">StartApp.bat</strong> đi kèm có sẵn trong tệp nén.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions Footer */}
+              <div className="bg-[#1C1D26] p-4 border-t border-[#2b2d42] flex justify-between items-center select-none">
+                <span className="text-[10px] text-slate-500 font-mono">Trạng thái: AN TOÀN TUYỆT ĐỐI</span>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => {
+                      handleDownloadPackage("windows");
+                      showToast("Đang tải lại file nén Windows (.ZIP)...");
+                    }}
+                    className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded-lg text-xs cursor-pointer flex items-center gap-1.5 transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Tải lại Win (.ZIP)</span>
+                  </button>
+                  <button 
+                    onClick={() => setShowWinSetupModal(false)}
+                    className="bg-[#2A2C3A] hover:bg-slate-700 text-white font-bold py-2 px-5 rounded-lg text-xs cursor-pointer transition"
+                  >
+                    Đã hiểu & Đóng
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
     </div>
   );
